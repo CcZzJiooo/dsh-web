@@ -1209,7 +1209,11 @@ export class TaskBoardHostService {
    */
   private onScheduleFire(target: number): void {
     if (this.disposed || !this.active) return
-    const now = this.now()
+    // A timer can fire a millisecond before the instant it was armed for: the
+    // wall clock read early, so the occurrence has to cover that instant. A
+    // clock that lags behind its own target would otherwise judge the
+    // occurrence "not due yet" and strand the rule forever.
+    const now = Math.max(this.now(), target)
     this.scheduleTarget = undefined
     this.ledger.setScheduler({ lastTickAt: now })
     if (now - target > RECOVERY_TOLERANCE_MS) {
