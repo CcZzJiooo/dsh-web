@@ -411,6 +411,94 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.dispose()
   })
 
+  it('user whose recurring rule fires a millisecond early still sees the occurrence run', async () => {
+    // Given a recurring rule armed for the next cron point
+    let now = new Date(2026, 7, 16, 10, 0, 30).getTime()
+    const ledger = new HostTaskLedger(root(), () => now)
+    ledger.applyRequest('create', {
+      kind: 'create', id: 'scheduled', input: {
+        title: 'Scheduled', description: '', prompt: 'work', schedule: { enabled: true, cron: '* * * * *' },
+      },
+    })
+    const create = vi.fn(async (_request: GatewayRequest) => ({ sessionId: 'session-scheduled' }))
+    const prompt = vi.fn(async (_request: GatewayRequest) => ({ accepted: true }))
+    const { gateway } = makeGateway(request => {
+      if (request.namespace !== 'session') throw new Error('unexpected namespace')
+      if (request.method === 'create') return create(request)
+      if (request.method === 'rename') return { title: 'Scheduled', seq: 1 }
+      if (request.method === 'prompt') return prompt(request)
+      throw new Error('unexpected gateway call')
+    })
+    const probe = timerProbe()
+    const service = new TaskBoardHostService(gateway, {
+      ledger,
+      power: new PowerInhibitor({ platform: 'linux' }),
+      timers: probe.timers,
+      now: () => now,
+      workspaceRegistry: fixtureWorkspaces(),
+    })
+    service.start()
+    expect(probe.delay).toBe(30_000)
+
+    // When the timer fires one millisecond before its own target, the
+    // occurrence is due anyway
+    now = new Date(2026, 7, 16, 10, 1, 0).getTime() - 1
+    await probe.trigger()
+
+    // Then the rule ran instead of being stranded in the past
+    expect(create).toHaveBeenCalledOnce()
+    expect(prompt).toHaveBeenCalledOnce()
+    expect(ledger.state().tasks[0].executions).toHaveLength(1)
+    // The schedule rolled to 10:02:00 instead of freezing in the past.
+    expect(ledger.state().tasks[0].schedule?.nextRunAt).toBe(new Date(2026, 7, 16, 10, 2, 0).getTime())
+    // The rule is armed again for the next cron point.
+    expect(probe.delay).toBeGreaterThan(0)
+    service.dispose()
+  })
+
+  it('user whose recurring rule lands far past its target sees it recorded as missed', async () => {
+    // Given a recurring rule armed for the next cron point
+    let now = new Date(2026, 7, 16, 10, 0, 30).getTime()
+    const ledger = new HostTaskLedger(root(), () => now)
+    ledger.applyRequest('create', {
+      kind: 'create', id: 'scheduled', input: {
+        title: 'Scheduled', description: '', prompt: 'work', schedule: { enabled: true, cron: '* * * * *' },
+      },
+    })
+    const create = vi.fn(async (_request: GatewayRequest) => ({ sessionId: 'session-scheduled' }))
+    const prompt = vi.fn(async (_request: GatewayRequest) => ({ accepted: true }))
+    const { gateway } = makeGateway(request => {
+      if (request.namespace !== 'session') throw new Error('unexpected namespace')
+      if (request.method === 'create') return create(request)
+      if (request.method === 'rename') return { title: 'Scheduled', seq: 1 }
+      if (request.method === 'prompt') return prompt(request)
+      throw new Error('unexpected gateway call')
+    })
+    const probe = timerProbe()
+    const service = new TaskBoardHostService(gateway, {
+      ledger,
+      power: new PowerInhibitor({ platform: 'linux' }),
+      timers: probe.timers,
+      now: () => now,
+      workspaceRegistry: fixtureWorkspaces(),
+    })
+    service.start()
+    expect(probe.delay).toBe(30_000)
+
+    // When the timer fires past the 60s recovery tolerance, the occurrence is
+    // stale
+    now = new Date(2026, 7, 16, 10, 1, 0).getTime() + 60_000 + 1
+    await probe.trigger()
+
+    // Then it is skipped as missed instead of being run
+    expect(create).not.toHaveBeenCalled()
+    expect(prompt).not.toHaveBeenCalled()
+    expect(ledger.state().tasks[0].schedule?.skippedReason).toBe('missed')
+    // The rule rolled past the stale occurrence to the next cron point.
+    expect(ledger.state().tasks[0].schedule?.nextRunAt).toBe(new Date(2026, 7, 16, 10, 3, 0).getTime())
+    service.dispose()
+  })
+
   it('user arming a one-shot sees it fire once and arm no further timer', async () => {
     let now = new Date(2026, 7, 16, 10, 0, 30).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
